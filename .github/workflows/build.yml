@@ -1,0 +1,54 @@
+name: build-vectors
+on:
+  schedule:
+    - cron: '45 23 * * *'   # 06:45 giờ Việt Nam, sau khi web cập nhật sao
+  workflow_dispatch:
+  push:
+    paths: ['worker/**', 'build/**', '.github/workflows/**']
+permissions:
+  contents: write
+concurrency: { group: build, cancel-in-progress: false }
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
+      CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 20, cache: npm, cache-dependency-path: package.json }
+      - run: npm install --no-audit --no-fund
+
+      # Option D: deploy the query-embedding Worker (skipped until the Cloudflare secrets exist)
+      - name: Deploy Worker
+        id: deploy
+        if: env.CF_API_TOKEN != '' && env.CF_ACCOUNT_ID != ''
+        continue-on-error: true
+        working-directory: worker
+        run: |
+          npx --yes wrangler@4 deploy 2>&1 | tee deploy.log
+          URL=$(grep -oE 'https://[a-z0-9.-]+\.workers\.dev' deploy.log | head -1)
+          echo "url=$URL" >> "$GITHUB_OUTPUT"
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
+
+      - uses: actions/cache@v4
+        with: { path: .models, key: minilm-v1 }
+
+      - name: Build vectors
+        run: node build/build.mjs
+        env:
+          WORKER_URL: ${{ steps.deploy.outputs.url }}
+
+      - name: Commit + refresh CDN
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A data
+          if git diff --cached --quiet; then echo "no change"; exit 0; fi
+          git commit -m "vectors $(date -u +%F)"
+          git push
+          curl -s "https://purge.jsdelivr.net/gh/${GITHUB_REPOSITORY}@main/data/meta.json" || true
