@@ -9,7 +9,7 @@ import crypto from 'node:crypto';
 const SITE = process.env.SITE_EXPORT || 'https://hoangngocquanganh.com/wp-json/rsa/v1/export';
 const ACC = process.env.CF_ACCOUNT_ID || '';
 const TOK = process.env.CF_API_TOKEN || '';
-const WORKER_URL = process.env.WORKER_URL || '';
+const WORKER_URL = process.env.WORKER_URL || process.env.WORKER_URL_VAR || '';
 const D_MODEL = '@cf/google/embeddinggemma-2', D_DIM = 256;
 const B_MODEL = 'Xenova/paraphrase-multilingual-MiniLM-L12-v2', B_DIM = 384;
 const DATA = new URL('../data/', import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1');
@@ -71,8 +71,36 @@ async function build(kind, dim, embedBatch, batchSize) {
 const ver = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 12);
 const meta = { ver, at: Date.now(), n: items.length, keys, hashes, worker: WORKER_URL || old?.worker || '' };
 
-// ---- D: Workers AI (needs CF secrets) ----
-if (ACC && TOK) {
+// ---- D via the rsa-embed Worker (no Cloudflare secret needed) ----
+if (meta.worker) {
+  const out = new Int8Array(items.length * D_DIM), ok = new Array(items.length).fill(0);
+  const pos = new Map(keys.map((k, i) => [k, i]));
+  let n = Infinity;
+  for (let from = 0; from < n; from += 50) {
+    let j;
+    for (let t = 0; t < 3; t++) {
+      try { const r = await fetch(`${meta.worker}/b?from=${from}`); if (r.ok) { j = await r.json(); break; } console.error('slice', from, r.status); }
+      catch (e) { console.error('slice', from, e.message); }
+      await new Promise((r) => setTimeout(r, 2000));
+    }
+    if (!j) break;
+    n = j.n;
+    const vs = j.v ? j.v.split(',') : [];
+    j.keys.forEach((k, x) => {
+      const i = pos.get(k);
+      if (i === undefined || !vs[x]) return;
+      out.set(new Int8Array(Buffer.from(vs[x], 'base64')), i * D_DIM); ok[i] = 1;
+    });
+    if (from % 1000 === 0) console.log('d', from, '/', n);
+  }
+  const good = ok.filter(Boolean).length;
+  console.log('d ok', good, '/', items.length);
+  if (good > items.length * 0.5) {
+    fs.writeFileSync(DATA + `d-${ver}.bin`, Buffer.from(out.buffer));
+    meta.d = { file: `d-${ver}.bin`, dim: D_DIM, model: D_MODEL, ok: good === items.length ? undefined : ok.map(Number) };
+  }
+} else if (ACC && TOK) {
+// ---- D: Workers AI REST (fallback when no Worker URL) ----
   const d = await build('d', D_DIM, async (idx) => {
     const r = await fetch(`https://api.cloudflare.com/client/v4/accounts/${ACC}/ai/run/${D_MODEL}`, {
       method: 'POST', headers: { Authorization: 'Bearer ' + TOK, 'Content-Type': 'application/json' },

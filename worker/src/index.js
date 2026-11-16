@@ -25,12 +25,37 @@ function toInt8B64(vec) {
   return btoa(s);
 }
 
+// GET /b?from=N → document vectors for site export items N..N+49 (used by the daily GitHub build).
+// Texts come only from the site's own export, never from the caller, and each slice is edge-cached
+// per export version, so repeated calls cost no neurons.
+const SITE_EXPORT = 'https://hoangngocquanganh.com/wp-json/rsa/v1/export';
+const SLICE = 50;
+let envRef;
+async function buildSlice(url, ctx, h) {
+  const from = Math.max(0, parseInt(url.searchParams.get('from') || '0', 10) || 0);
+  const ex = await (await fetch(SITE_EXPORT, { cf: { cacheTtl: 600, cacheEverything: true } })).json();
+  const key = new Request(`https://rsa-embed.cache/b?at=${ex.at}&from=${from}`);
+  const hit = await caches.default.match(key);
+  if (hit) return new Response(hit.body, { headers: { ...h, 'Content-Type': 'application/json' } });
+  const items = ex.items.slice(from, from + SLICE);
+  let v = '';
+  if (items.length) {
+    const out = await envRef.AI.run(MODEL, { input: items.map((x) => `title: ${x.ti || 'none'} | text: ${x.t}`), dimensions: DIM });
+    v = out.data.map((d) => toInt8B64(d.embedding)).join(',');
+  }
+  const body = JSON.stringify({ at: ex.at, n: ex.items.length, from, keys: items.map((x) => x.k), v });
+  ctx.waitUntil(caches.default.put(key, new Response(body, { headers: { 'Cache-Control': 'public, max-age=86400' } })));
+  return new Response(body, { headers: { ...h, 'Content-Type': 'application/json' } });
+}
+
 export default {
   async fetch(req, env, ctx) {
+    envRef = env;
     const url = new URL(req.url);
     const h = cors(req.headers.get('Origin'));
     if (req.method === 'OPTIONS') return new Response(null, { headers: h });
     if (url.pathname === '/health') return Response.json({ ok: true, model: MODEL, dim: DIM }, { headers: h });
+    if (url.pathname === '/b') return buildSlice(url, ctx, h);
     if (url.pathname !== '/e') return new Response('not found', { status: 404, headers: h });
 
     const q = (url.searchParams.get('q') || '').trim().toLowerCase().replace(/\s+/g, ' ').slice(0, 200);

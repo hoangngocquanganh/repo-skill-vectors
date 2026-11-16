@@ -42,6 +42,7 @@ jobs:
         run: node build/build.mjs
         env:
           WORKER_URL: ${{ steps.deploy.outputs.url }}
+          WORKER_URL_VAR: ${{ vars.WORKER_URL }}
 
       - name: Commit + refresh CDN
         run: |
